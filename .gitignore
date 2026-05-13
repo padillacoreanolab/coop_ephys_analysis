@@ -1,0 +1,76 @@
+# -------------------------
+# Python cache / build files
+# -------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# -------------------------
+# Jupyter Notebook checkpoints
+# -------------------------
+.ipynb_checkpoints/
+
+# -------------------------
+# Python / Conda environments
+# -------------------------
+.env
+.venv
+venv/
+env/
+lfp_env/
+.conda/
+
+# -------------------------
+# VS Code / editor files
+# -------------------------
+.vscode/
+
+# -------------------------
+# OS files
+# -------------------------
+.DS_Store
+Thumbs.db
+
+# -------------------------
+# Data folders
+# Usually do not commit raw or processed data
+# -------------------------
+data/raw/
+data/processed/
+
+# -------------------------
+# Large scientific data files
+# -------------------------
+*.mat
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.pickle
+
+# -------------------------
+# Results / generated outputs
+# -------------------------
+results/
+figures/
+outputs/
+
+# -------------------------
+# Logs and temporary files
+# -------------------------
+*.log
+*.tmp
+~$*
+
+# -------------------------
+# Optional: SLURM / HiPerGator output files
+# -------------------------
+slurm-*.out
+*.err
+*.out
