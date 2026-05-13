@@ -60,3 +60,61 @@ git add external/diff_fam_social_memory_ephys
 git commit -m "Update diff_fam_social_memory_ephys submodule"
 git push
 ```
+
+## Environment Setup
+
+This project uses a Conda/Mamba environment defined in:
+
+```text
+environment.yml
+```
+
+To create the environment, run:
+
+```bash
+mamba env create -f environment.yml
+```
+
+or, if using Conda:
+
+```bash
+conda env create -f environment.yml
+```
+
+To activate the environment:
+
+```bash
+mamba activate coop_ephys_env
+```
+
+or:
+
+```bash
+conda activate coop_ephys_env
+```
+
+To register this environment as a Jupyter kernel:
+
+```bash
+python -m ipykernel install --user --name coop_ephys_env --display-name "Python (coop_ephys_env)"
+```
+
+After this, select the kernel named:
+
+```text
+Python (coop_ephys_env)
+```
+
+inside Jupyter Notebook or VS Code.
+
+If the environment already exists and `environment.yml` has been updated, update the environment with:
+
+```bash
+mamba env update -f environment.yml --prune
+```
+
+or:
+
+```bash
+conda env update -f environment.yml --prune
+```
