@@ -1,0 +1,3 @@
+[submodule "external/diff_fam_social_memory_ephys"]
+	path = external/diff_fam_social_memory_ephys
+	url = https://github.com/padillacoreanolab/diff_fam_social_memory_ephys.git
