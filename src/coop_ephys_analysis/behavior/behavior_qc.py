@@ -1,6 +1,35 @@
 """Utilities for quality-control checks on behavior events."""
+import external.diff_fam_social_memory_ephys.behavior.behavioral_epoch_tools as bet
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+def threshold_stage_behaviors(stage_list, behaviors, min_iti, min_bout):
+    """
+    Threshold selected behaviors across every recording in a stage list.
+
+    Parameters:
+        stage_list (list): List of dictionaries where each dictionary corresponds
+            to a day/stage. Each is keyed by recording name and maps to a dict of
+            behavior names to an (N, 2) array of start/stop times.
+        behaviors (list): Behavior names to threshold in every recording.
+        min_iti (float): Minimum inter-bout interval in seconds. Bouts separated
+            by less than this value are combined.
+        min_bout (float): Minimum bout length in seconds. Shorter bouts are removed.
+
+    Returns:
+        list: The same stage list, updated in place.
+    """
+    for day_data in stage_list:
+        for behavior_dict in day_data.values():
+            for behavior in behaviors:
+                behavior_dict[behavior] = bet.threshold_bouts(
+                    behavior_dict[behavior],
+                    min_iti=min_iti,
+                    min_bout=min_bout,
+                )
+
+    return stage_list
 
 
 def count_events(
@@ -158,8 +187,6 @@ def between_events_duration_distribution(
                 (total_between_event_durations, rec_between_event_durations)
             )
 
-    print(total_between_event_durations.size)
-
     plt.figure(figsize=(12, 5))
     plt.hist(
         total_between_event_durations,
@@ -181,7 +208,7 @@ def between_events_duration_distribution(
 
 def plot_recordings_behaviors(
     stage_list,
-    behavior_order=None,
+    behavior_order=["selfish light", "selfish nose poke", "subject port entry", "coop light", "coop nose poke", "recipient port entry"],
     time_window=None,
     day=None,
     mode="multiple recordings",
@@ -260,7 +287,7 @@ def plot_recordings_behaviors(
     if mode == "multiple recordings":
         for stage_idx, stage in enumerate(days_to_plot, start=(day or 1)):
             for rec, rec_beh in stage.items():
-                _plot_single(f"Stage{stage_idx} {rec}", rec_beh)
+                _plot_single(rec, rec_beh)
         return None
 
     if mode == "single recording":
@@ -281,15 +308,16 @@ def plot_recordings_behaviors(
 
 def find_iti_windows(behaviors, window_duration=2.0, time_bounds=None, stage=None, day=None):
     """
-    Print non-overlapping ITI window counts for a day or stage.
+    Count or print non-overlapping ITI windows.
 
     ITI windows are defined as periods where no behavioral events occur.
     Overlapping events are merged before gap detection.
 
     Parameters:
         behaviors (list or dict): Either an entire stage list shaped like
-            [{recording_name: {behavior_name: events}}, ...] or one day dictionary
-            shaped like {recording_name: {behavior_name: events}}.
+            [{recording_name: {behavior_name: events}}, ...], one day dictionary
+            shaped like {recording_name: {behavior_name: events}}, or one
+            recording dictionary shaped like {behavior_name: events}.
         window_duration (float): Duration of ITI window to find. The default is
             2.0 seconds.
         time_bounds (tuple): Recording time bounds (min_time, max_time). If None,
@@ -299,13 +327,14 @@ def find_iti_windows(behaviors, window_duration=2.0, time_bounds=None, stage=Non
         day (int): Optional 1-based day index for stage inputs.
 
     Returns:
-        None.
+        int or None: Returns an ITI window count when given one recording.
+        Prints summaries and returns None when given one day or a stage list.
     """
-    print("=" * 60)
-    print(f"{window_duration}-SECOND ITI WINDOW ANALYSIS")
-    print("=" * 60)
-
     if isinstance(behaviors, list):
+        print("=" * 60)
+        print(f"{window_duration}-SECOND ITI WINDOW ANALYSIS")
+        print("=" * 60)
+
         if day is not None:
             idx = day - 1
             if idx < 0 or idx >= len(behaviors):
@@ -328,6 +357,17 @@ def find_iti_windows(behaviors, window_duration=2.0, time_bounds=None, stage=Non
         return None
 
     if isinstance(behaviors, dict):
+        if _is_recording_behaviors(behaviors):
+            return _count_iti_windows_for_recording(
+                behaviors,
+                window_duration=window_duration,
+                time_bounds=time_bounds,
+            )
+
+        print("=" * 60)
+        print(f"{window_duration}-SECOND ITI WINDOW ANALYSIS")
+        print("=" * 60)
+
         _print_iti_windows_for_day(
             behaviors,
             day_idx=day,
@@ -336,7 +376,13 @@ def find_iti_windows(behaviors, window_duration=2.0, time_bounds=None, stage=Non
         )
         return None
 
-    raise ValueError("behaviors must be either a stage list or one day dictionary.")
+    raise ValueError(
+        "behaviors must be a stage list, one day dictionary, or one recording dictionary."
+    )
+
+
+def _is_recording_behaviors(behaviors):
+    return all(not isinstance(events, dict) for events in behaviors.values())
 
 
 def _print_iti_windows_for_day(day_data, day_idx, window_duration, time_bounds):

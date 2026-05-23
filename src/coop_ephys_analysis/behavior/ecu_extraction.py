@@ -62,6 +62,44 @@ def load_pickle(path):
         return pickle.load(file)
 
 
+def load_stage_pickles(folder, stage=4):
+    """
+    Load daily stage pickle files from a folder into a day-ordered stage list.
+
+    Parameters:
+        folder (str or Path): Folder containing files named Stage{stage}_D{day}.pkl.
+        stage (int or str): Stage number used in the pickle filenames.
+
+    Returns:
+        list: Daily behavior dictionaries sorted by numeric day.
+    """
+    folder = Path(folder)
+    _require_existing_folder(folder)
+    pickle_paths = sorted(
+        folder.glob(f"Stage{stage}_D*.pkl"),
+        key=_stage_pickle_day,
+    )
+    return [load_pickle(path) for path in pickle_paths]
+
+
+def save_stage_pickles(stage_list, folder, stage=4):
+    """
+    Save a day-ordered stage list as daily pickle files.
+
+    Parameters:
+        stage_list (list): List of daily behavior dictionaries.
+        folder (str or Path): Output folder for Stage{stage}_D{day}.pkl files.
+        stage (int or str): Stage number used in the pickle filenames.
+
+    Returns:
+        None.
+    """
+    folder = Path(folder)
+    _require_existing_folder(folder)
+    for day, day_behaviors in enumerate(stage_list, start=1):
+        save_pickle(day_behaviors, folder / f"Stage{stage}_D{day}.pkl")
+
+
 def load_recording_box_map(csv_path):
     """
     Read a CSV that maps recording names to ECU box numbers.
@@ -259,6 +297,18 @@ def _as_scalar(value):
     if array.shape == ():
         return array.item()
     return array.flat[0]
+
+
+def _stage_pickle_day(path):
+    day_text = Path(path).stem.rsplit("_D", maxsplit=1)[1]
+    return int(day_text)
+
+
+def _require_existing_folder(folder):
+    if not folder.exists():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+    if not folder.is_dir():
+        raise NotADirectoryError(f"Expected a folder, got: {folder}")
 
 
 def _extract_din_name(file_name: str) -> str:
