@@ -142,7 +142,8 @@ def trodes_data_to_events(
         allowed_bad_recordings (set): Recording names allowed to bypass transition-order checks.
 
     Returns:
-        list: List of [start, stop] behavior events in seconds.
+        np.ndarray: Array of [start, stop] behavior events in seconds with
+            shape (n_events, 2).
     """
     if allowed_bad_recordings is None:
         allowed_bad_recordings = DEFAULT_ALLOWED_BAD_RECORDINGS
@@ -169,7 +170,7 @@ def trodes_data_to_events(
             event = []
         expected_status = 1 - expected_status
 
-    return np.array(events, dtype=float).tolist()
+    return np.array(events, dtype=float).reshape(-1, 2)
 
 
 def load_trodes_recording(
