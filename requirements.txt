@@ -1,3 +1,6 @@
+# NumPy is pinned to 1.x because spikeinterface==0.100.6 C extensions are compiled
+# against NumPy 1.x and can hard-crash with NumPy 2.x. Do not upgrade NumPy
+# without also upgrading spikeinterface to a NumPy-2-compatible version.
 numpy==1.26.4
 scipy==1.14.1
 pandas==2.2.3
@@ -14,3 +17,7 @@ PyYAML==6.0.2
 openpyxl==3.1.5
 tqdm==4.67.1
 spectral-connectivity==1.1.2
+h5py==3.11.0
+spikeinterface==0.100.6
+bidict==0.23.1
+requests==2.31.0
