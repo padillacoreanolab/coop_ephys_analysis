@@ -207,6 +207,8 @@ def load_trodes_recording(
             continue
 
         trodes_data = tre.read_trodes_extracted_data_file(dat_path)
+        # print(trodes_data)
+		# print(trodes_data["data"].shape, trodes_data["clockrate"], trodes_data["first_timestamp"])
         behavior_name = box_to_ecu[box][din]
         behaviors[behavior_name] = trodes_data_to_events(
             recording_name=recording_name,
