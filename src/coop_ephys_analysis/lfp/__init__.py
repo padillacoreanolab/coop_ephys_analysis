@@ -7,6 +7,7 @@ from .analysis import (
     load_lfp_collection,
     plot_collection_event_spectrogram,
     plot_collection_spectral_traces,
+    plot_event_average_spectrogram,
     plot_recording_event_spectrogram,
     plot_recording_spectral_traces,
 )
@@ -19,6 +20,7 @@ from .processing import (
     parse_animal_id,
     select_recordings_by_condition,
     summarize_event_windows,
+    update_collection_events_from_behavior,
 )
 
 __all__ = [
@@ -34,8 +36,10 @@ __all__ = [
     "parse_animal_id",
     "plot_collection_event_spectrogram",
     "plot_collection_spectral_traces",
+    "plot_event_average_spectrogram",
     "plot_recording_event_spectrogram",
     "plot_recording_spectral_traces",
     "select_recordings_by_condition",
     "summarize_event_windows",
+    "update_collection_events_from_behavior",
 ]

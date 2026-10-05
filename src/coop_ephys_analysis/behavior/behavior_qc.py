@@ -4,6 +4,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+_FILTERED_NOSE_POKE_PAIRS = (
+    ("selfish nose poke", "selfish light", "filtered selfish nose pokes"),
+    ("coop nose poke", "coop light", "filtered coop nose pokes"),
+)
+
+
 def threshold_stage_behaviors(stage_list, behaviors, min_iti, min_bout):
     """
     Threshold selected behaviors across every recording in a stage list.
@@ -206,9 +212,20 @@ def between_events_duration_distribution(
     plt.show()
 
 
+_DEFAULT_BEHAVIOR_ORDER = (
+    "selfish light",
+    "selfish nose poke",
+    "subject port entry",
+    "coop light",
+    "coop nose poke",
+    "recipient port entry",
+)
+_BASELINE_ITI_COLOR = "#B0B0B0"
+
+
 def plot_recordings_behaviors(
     stage_list,
-    behavior_order=["selfish light", "selfish nose poke", "subject port entry", "coop light", "coop nose poke", "recipient port entry"],
+    behavior_order=_DEFAULT_BEHAVIOR_ORDER,
     time_window=None,
     day=None,
     mode="multiple recordings",
@@ -220,8 +237,9 @@ def plot_recordings_behaviors(
         stage_list (list): List of dictionaries where each dictionary corresponds
             to a day/stage. Each is keyed by recording name and maps to a dict of
             behavior names to an (N, 2) array of start/stop times.
-        behavior_order (list): Explicit order of behaviors to display. If None,
-            the union of all behaviors across recordings is used.
+        behavior_order (sequence): Explicit order of behaviors to display. When
+            omitted, the standard behaviors are shown followed by any saved
+            baseline ITI events. If None, all events in each recording are shown.
         time_window (tuple): If provided, only events that fall within the window
             are shown and the x-axis limits are set accordingly. Use (xmin, xmax).
         day (int): If provided, limits plotting to that one day using a 1-based
@@ -232,18 +250,35 @@ def plot_recordings_behaviors(
     Returns:
         None.
     """
-    if behavior_order is None:
-        behaviors = set()
-        for stage in stage_list:
-            for rec_dict in stage.values():
-                behaviors.update(rec_dict.keys())
-        behavior_order = sorted(behaviors)
-
     def _plot_single(rec_name, rec_beh):
-        ordered = {b: np.array(rec_beh.get(b, [])) for b in behavior_order}
+        baseline_events = sorted(
+            (event for event in rec_beh if _is_baseline_iti_event(event)),
+            key=_baseline_iti_sort_key,
+        )
+        if behavior_order is _DEFAULT_BEHAVIOR_ORDER:
+            plot_order = list(_DEFAULT_BEHAVIOR_ORDER)
+            plot_order.extend(
+                event for event in baseline_events if event not in plot_order
+            )
+        elif behavior_order is None:
+            ordinary_events = sorted(
+                event for event in rec_beh if not _is_baseline_iti_event(event)
+            )
+            plot_order = ordinary_events + baseline_events
+        else:
+            plot_order = list(behavior_order)
+
+        ordered = {b: np.array(rec_beh.get(b, [])) for b in plot_order}
         n_beh = len(ordered)
         fig, ax = plt.subplots(figsize=(10, 0.6 * n_beh))
-        color_map = {label: [np.random.random() for _ in range(3)] for label in ordered}
+        color_map = {
+            label: (
+                _BASELINE_ITI_COLOR
+                if _is_baseline_iti_event(label)
+                else [np.random.random() for _ in range(3)]
+            )
+            for label in ordered
+        }
 
         yticks = []
         yticklabels = []
@@ -306,12 +341,183 @@ def plot_recordings_behaviors(
     raise ValueError("mode must be either 'multiple recordings' or 'single recording'.")
 
 
-def find_iti_windows(behaviors, window_duration=2.0, time_bounds=None, stage=None, day=None):
+def find_filtered_nose_pokes(
+    behaviors,
+    max_gap=1.0,
+    stage=None,
+    day=None,
+    save=False,
+):
+    """Find nose-poke bouts associated with their corresponding light onset.
+
+    A light can match an unused nose poke when it begins during the poke or no
+    more than ``max_gap`` seconds after the poke ends. Lights are processed in
+    chronological order and select the closest eligible unused poke. The input
+    hierarchy is preserved in the returned result.
+
+    Parameters:
+        behaviors (list or dict): A stage list, day dictionary, or one recording's
+            behavior dictionary.
+        max_gap (float): Maximum seconds allowed between a poke ending and its
+            corresponding light beginning.
+        stage (int or str): Optional stage label retained for API consistency.
+        day (int): Optional 1-based day to process when ``behaviors`` is a stage list.
+        save (bool): If True, copy filtered arrays into the supplied behavior
+            dictionaries under ``filtered selfish nose pokes`` and
+            ``filtered coop nose pokes``.
+
+    Returns:
+        dict or list: Filtered event arrays following the input hierarchy.
     """
-    Count or print non-overlapping ITI windows.
+    del stage
+    max_gap = float(max_gap)
+    if not np.isfinite(max_gap) or max_gap < 0:
+        raise ValueError("max_gap must be a finite value greater than or equal to 0.")
+
+    if isinstance(behaviors, list):
+        if day is not None:
+            day_index = day - 1
+            if day_index < 0 or day_index >= len(behaviors):
+                raise ValueError(f"day must be between 1 and {len(behaviors)}")
+            return _filter_nose_pokes_for_day(
+                behaviors[day_index],
+                max_gap=max_gap,
+                save=save,
+            )
+
+        return [
+            _filter_nose_pokes_for_day(day_data, max_gap=max_gap, save=save)
+            for day_data in behaviors
+        ]
+
+    if isinstance(behaviors, dict):
+        if _is_recording_behaviors(behaviors):
+            filtered = _filter_nose_pokes_for_recording(
+                behaviors,
+                max_gap=max_gap,
+            )
+            if save:
+                _save_filtered_nose_pokes(behaviors, filtered)
+            return filtered
+
+        return _filter_nose_pokes_for_day(
+            behaviors,
+            max_gap=max_gap,
+            save=save,
+        )
+
+    raise ValueError(
+        "behaviors must be a stage list, one day dictionary, or one recording dictionary."
+    )
+
+
+def _filter_nose_pokes_for_day(day_data, max_gap, save):
+    filtered_day = {}
+    for recording_name, recording_behaviors in day_data.items():
+        filtered = _filter_nose_pokes_for_recording(
+            recording_behaviors,
+            max_gap=max_gap,
+        )
+        if save:
+            _save_filtered_nose_pokes(recording_behaviors, filtered)
+        filtered_day[recording_name] = filtered
+    return filtered_day
+
+
+def _filter_nose_pokes_for_recording(recording_behaviors, max_gap):
+    filtered = {}
+    for nose_poke_name, light_name, filtered_name in _FILTERED_NOSE_POKE_PAIRS:
+        nose_pokes = _valid_behavior_intervals(
+            recording_behaviors.get(nose_poke_name),
+            event_name=nose_poke_name,
+        )
+        lights = _valid_behavior_intervals(
+            recording_behaviors.get(light_name),
+            event_name=light_name,
+        )
+        filtered[filtered_name] = _match_nose_pokes_to_lights(
+            nose_pokes,
+            lights,
+            max_gap=max_gap,
+        )
+    return filtered
+
+
+def _valid_behavior_intervals(events, event_name):
+    if events is None:
+        return np.empty((0, 2), dtype=float)
+
+    event_array = np.asarray(events, dtype=float)
+    if event_array.size == 0:
+        return np.empty((0, 2), dtype=float)
+
+    event_array = np.atleast_2d(event_array)
+    if event_array.ndim != 2 or event_array.shape[1] != 2:
+        raise ValueError(f"Behavior {event_name!r} must contain [start, stop] pairs.")
+
+    valid_rows = (
+        np.isfinite(event_array).all(axis=1)
+        & (event_array[:, 1] > event_array[:, 0])
+    )
+    return event_array[valid_rows].copy()
+
+
+def _match_nose_pokes_to_lights(nose_pokes, lights, max_gap):
+    if len(nose_pokes) == 0 or len(lights) == 0:
+        return np.empty((0, 2), dtype=float)
+
+    nose_order = np.lexsort((nose_pokes[:, 1], nose_pokes[:, 0]))
+    light_order = np.lexsort((lights[:, 1], lights[:, 0]))
+    sorted_nose_pokes = nose_pokes[nose_order]
+    sorted_lights = lights[light_order]
+    used_nose_pokes = set()
+    matched_nose_pokes = []
+
+    for light_start, _ in sorted_lights:
+        eligible = []
+        for poke_index, (poke_start, poke_stop) in enumerate(sorted_nose_pokes):
+            if poke_index in used_nose_pokes:
+                continue
+            if poke_start <= light_start <= poke_stop + max_gap:
+                separation = max(0.0, light_start - poke_stop)
+                eligible.append(
+                    (separation, -poke_stop, -poke_start, poke_index)
+                )
+
+        if not eligible:
+            continue
+
+        _, _, _, matched_index = min(eligible)
+        used_nose_pokes.add(matched_index)
+        matched_nose_pokes.append(sorted_nose_pokes[matched_index].copy())
+
+    if not matched_nose_pokes:
+        return np.empty((0, 2), dtype=float)
+
+    matched = np.asarray(matched_nose_pokes, dtype=float)
+    return matched[np.lexsort((matched[:, 1], matched[:, 0]))]
+
+
+def _save_filtered_nose_pokes(recording_behaviors, filtered):
+    for event_name, event_array in filtered.items():
+        recording_behaviors[event_name] = event_array.copy()
+
+
+def find_iti_windows(
+    behaviors,
+    window_duration=2.0,
+    time_bounds=None,
+    stage=None,
+    day=None,
+    buffer=0.5,
+    save=False,
+):
+    """
+    Find and optionally save non-overlapping ITI windows.
 
     ITI windows are defined as periods where no behavioral events occur.
-    Overlapping events are merged before gap detection.
+    Each event is expanded by ``buffer`` seconds on both sides before overlapping
+    events are merged and gaps are detected.
 
     Parameters:
         behaviors (list or dict): Either an entire stage list shaped like
@@ -325,10 +531,17 @@ def find_iti_windows(behaviors, window_duration=2.0, time_bounds=None, stage=Non
         stage (int or str): Stage label accepted for consistency with other QC
             functions.
         day (int): Optional 1-based day index for stage inputs.
+        buffer (float): Seconds excluded before and after every annotated event.
+            The default is 0.5 seconds, matching half of the current 1-second
+            LFP spectral window.
+        save (bool): If True, add the windows to each recording's behavior
+            dictionary under ``"baseline iti Xs"``. This updates the supplied
+            dictionaries in memory; it does not write a pickle file.
 
     Returns:
         int or None: Returns an ITI window count when given one recording.
         Prints summaries and returns None when given one day or a stage list.
+        When ``save=True``, the input behavior dictionaries are also updated.
     """
     if isinstance(behaviors, list):
         print("=" * 60)
@@ -344,6 +557,8 @@ def find_iti_windows(behaviors, window_duration=2.0, time_bounds=None, stage=Non
                 day_idx=day,
                 window_duration=window_duration,
                 time_bounds=time_bounds,
+                buffer=buffer,
+                save=save,
             )
             return None
 
@@ -353,16 +568,22 @@ def find_iti_windows(behaviors, window_duration=2.0, time_bounds=None, stage=Non
                 day_idx=day_idx,
                 window_duration=window_duration,
                 time_bounds=time_bounds,
+                buffer=buffer,
+                save=save,
             )
         return None
 
     if isinstance(behaviors, dict):
         if _is_recording_behaviors(behaviors):
-            return _count_iti_windows_for_recording(
+            windows = _find_iti_windows_for_recording(
                 behaviors,
                 window_duration=window_duration,
                 time_bounds=time_bounds,
+                buffer=buffer,
             )
+            if save:
+                behaviors[_baseline_iti_event_name(window_duration)] = windows
+            return len(windows)
 
         print("=" * 60)
         print(f"{window_duration}-SECOND ITI WINDOW ANALYSIS")
@@ -373,6 +594,8 @@ def find_iti_windows(behaviors, window_duration=2.0, time_bounds=None, stage=Non
             day_idx=day,
             window_duration=window_duration,
             time_bounds=time_bounds,
+            buffer=buffer,
+            save=save,
         )
         return None
 
@@ -385,69 +608,143 @@ def _is_recording_behaviors(behaviors):
     return all(not isinstance(events, dict) for events in behaviors.values())
 
 
-def _print_iti_windows_for_day(day_data, day_idx, window_duration, time_bounds):
+def _print_iti_windows_for_day(
+    day_data,
+    day_idx,
+    window_duration,
+    time_bounds,
+    buffer,
+    save,
+):
     if day_idx is not None:
         print(f"\n--- Day {day_idx} ---")
 
     for recording_name, recording_behaviors in day_data.items():
-        num_windows = _count_iti_windows_for_recording(
+        windows = _find_iti_windows_for_recording(
             recording_behaviors,
             window_duration=window_duration,
             time_bounds=time_bounds,
+            buffer=buffer,
         )
-        print(f"{recording_name}: {num_windows} {window_duration}s ITI windows")
+        if save:
+            recording_behaviors[_baseline_iti_event_name(window_duration)] = windows
+        print(f"{recording_name}: {len(windows)} {window_duration}s ITI windows")
 
 
 def _count_iti_windows_for_recording(
     recording_behaviors,
     window_duration=2.0,
     time_bounds=None,
+    buffer=0.5,
 ):
+    return len(
+        _find_iti_windows_for_recording(
+            recording_behaviors,
+            window_duration=window_duration,
+            time_bounds=time_bounds,
+            buffer=buffer,
+        )
+    )
+
+
+def _baseline_iti_event_name(window_duration):
+    duration = float(window_duration)
+    duration_label = str(int(duration)) if duration.is_integer() else f"{duration:g}"
+    return f"baseline iti {duration_label}s"
+
+
+def _is_baseline_iti_event(event_name):
+    return str(event_name).casefold().startswith("baseline iti ")
+
+
+def _baseline_iti_sort_key(event_name):
+    duration_label = str(event_name).rsplit(" ", maxsplit=1)[-1]
+    try:
+        duration = float(duration_label.removesuffix("s"))
+    except ValueError:
+        duration = float("inf")
+    return duration, str(event_name)
+
+
+def _find_iti_windows_for_recording(
+    recording_behaviors,
+    window_duration=2.0,
+    time_bounds=None,
+    buffer=0.5,
+):
+    if window_duration <= 0:
+        raise ValueError("window_duration must be greater than 0 seconds.")
+    if buffer < 0:
+        raise ValueError("buffer must be greater than or equal to 0 seconds.")
+
     all_events = []
     for behavior_name, events in recording_behaviors.items():
-        if len(events) > 0:
-            all_events.extend([tuple(event) for event in events])
+        if _is_baseline_iti_event(behavior_name) or events is None:
+            continue
 
-    if not all_events:
-        return 0
+        events = np.asarray(events, dtype=float)
+        if events.size == 0:
+            continue
+        events = np.atleast_2d(events)
+        if events.shape[1] < 2:
+            raise ValueError(f"Behavior {behavior_name!r} must contain [start, stop] pairs.")
 
-    all_events.sort(key=lambda x: x[0])
-    all_events = np.array(all_events)
-
-    merged_events = [all_events[0]]
-    for current_event in all_events[1:]:
-        last_event = merged_events[-1]
-        if current_event[0] < last_event[1]:
-            merged_events[-1] = [last_event[0], max(last_event[1], current_event[1])]
-        else:
-            merged_events.append(current_event)
-
-    merged_events = np.array(merged_events)
+        valid_events = events[:, :2]
+        valid_events = valid_events[
+            np.isfinite(valid_events).all(axis=1)
+            & (valid_events[:, 1] > valid_events[:, 0])
+        ]
+        all_events.extend(valid_events.tolist())
 
     if time_bounds is None:
-        min_time = 0
-        max_time = merged_events[:, 1].max() + 10
+        if not all_events:
+            return np.empty((0, 2), dtype=float)
+        min_time = 0.0
+        max_time = max(event[1] for event in all_events) + 10.0
     else:
-        min_time, max_time = time_bounds
+        min_time, max_time = [float(value) for value in time_bounds]
+        if max_time <= min_time:
+            raise ValueError("time_bounds must satisfy max_time > min_time.")
+
+    if not all_events:
+        merged_events = np.empty((0, 2), dtype=float)
+    else:
+        padded_events = np.asarray(all_events, dtype=float)
+        padded_events[:, 0] = np.maximum(padded_events[:, 0] - buffer, min_time)
+        padded_events[:, 1] = np.minimum(padded_events[:, 1] + buffer, max_time)
+        padded_events = padded_events[padded_events[:, 1] > padded_events[:, 0]]
+        padded_events = padded_events[np.argsort(padded_events[:, 0])]
+
+        if len(padded_events) == 0:
+            merged_events = np.empty((0, 2), dtype=float)
+        else:
+            merged_events = [padded_events[0].tolist()]
+            for current_start, current_stop in padded_events[1:]:
+                last_event = merged_events[-1]
+                if current_start <= last_event[1]:
+                    last_event[1] = max(last_event[1], current_stop)
+                else:
+                    merged_events.append([current_start, current_stop])
+            merged_events = np.asarray(merged_events, dtype=float)
 
     gaps = []
+    cursor = min_time
+    for event_start, event_stop in merged_events:
+        if event_start > cursor:
+            gaps.append((cursor, event_start))
+        cursor = max(cursor, event_stop)
+    if cursor < max_time:
+        gaps.append((cursor, max_time))
 
-    for i in range(len(merged_events) - 1):
-        gap_start = merged_events[i, 1]
-        gap_end = merged_events[i + 1, 0]
-        if gap_end > gap_start:
-            gaps.append((gap_start, gap_end))
-
-    gaps.append((merged_events[-1, 1], max_time))
-
-    total_windows = 0
+    iti_windows = []
     for gap_start, gap_end in gaps:
-        gap_duration = gap_end - gap_start
-        if gap_duration >= window_duration:
-            num_windows = int(gap_duration // window_duration)
-            total_windows += num_windows
+        current_start = gap_start
+        while current_start + window_duration <= gap_end:
+            current_stop = current_start + window_duration
+            iti_windows.append([current_start, current_stop])
+            current_start = current_stop
 
-    return total_windows
+    return np.asarray(iti_windows, dtype=float).reshape(-1, 2)
 
 
 def _count_multiple_recordings(behaviors_dict, stage, day):

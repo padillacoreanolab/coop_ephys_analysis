@@ -18,10 +18,12 @@ from coop_ephys_analysis.lfp import (  # noqa: E402
     average_events_by_condition,
     build_condition_dict,
     get_iti_windows,
+    plot_event_average_spectrogram,
     plot_recording_event_spectrogram,
     plot_recording_spectral_traces,
     select_recordings_by_condition,
     summarize_event_windows,
+    update_collection_events_from_behavior,
 )
 
 
@@ -156,6 +158,118 @@ class LfpHelperTests(unittest.TestCase):
             np.ndarray,
         )
 
+    def test_update_collection_events_merges_converts_and_preserves_source(self):
+        recording = make_recording(
+            "a.rec",
+            events={
+                "lfp only": np.array([[500.0, 750.0]]),
+                "selfish light": np.array([[999.0, 1000.0]]),
+            },
+        )
+        collection = SimpleNamespace(
+            recordings=[recording],
+            recording_to_event_dict={
+                "a.rec": {"lfp only": np.array([[500.0, 750.0]])}
+            },
+        )
+        source = {
+            "a": {
+                "selfish light": np.array([[1.0, 2.0]]),
+                "baseline iti 2s": np.array([[3.0, 5.0]]),
+                "filtered selfish nose pokes": np.array([[6.0, 7.0]]),
+            },
+            "unused": {"event": np.array([[1.0, 2.0]])},
+        }
+        source_copy = {
+            name: {event: values.copy() for event, values in events.items()}
+            for name, events in source.items()
+        }
+
+        summary = update_collection_events_from_behavior(
+            collection,
+            source,
+            source_unit="seconds",
+            strict=False,
+        )
+
+        np.testing.assert_allclose(
+            recording.event_dict["selfish light"],
+            np.array([[1000.0, 2000.0]]),
+        )
+        np.testing.assert_allclose(
+            recording.event_dict["baseline iti 2s"],
+            np.array([[3000.0, 5000.0]]),
+        )
+        np.testing.assert_allclose(
+            recording.event_dict["filtered selfish nose pokes"],
+            np.array([[6000.0, 7000.0]]),
+        )
+        np.testing.assert_allclose(
+            recording.event_dict["lfp only"],
+            np.array([[500.0, 750.0]]),
+        )
+        np.testing.assert_allclose(
+            collection.recording_to_event_dict["a.rec"]["baseline iti 2s"],
+            np.array([[3000.0, 5000.0]]),
+        )
+        np.testing.assert_allclose(
+            collection.recording_to_event_dict["a.rec"][
+                "filtered selfish nose pokes"
+            ],
+            np.array([[6000.0, 7000.0]]),
+        )
+        self.assertEqual(summary["updated_recordings"], ["a.rec"])
+        self.assertEqual(summary["unused_behavior_recordings"], ["unused"])
+        for name, events in source.items():
+            for event, values in events.items():
+                np.testing.assert_array_equal(values, source_copy[name][event])
+
+    def test_update_collection_events_strict_missing_is_transactional(self):
+        first = make_recording("a.rec", events={"old": np.array([[1.0, 2.0]])})
+        second = make_recording("b.rec", events={"old": np.array([[3.0, 4.0]])})
+        collection = SimpleNamespace(
+            recordings=[first, second],
+            recording_to_event_dict={},
+        )
+
+        with self.assertRaisesRegex(ValueError, "missing collection recording"):
+            update_collection_events_from_behavior(
+                collection,
+                {"a": {"new": np.array([[5.0, 6.0]])}},
+                strict=True,
+            )
+
+        self.assertNotIn("new", first.event_dict)
+        self.assertEqual(collection.recording_to_event_dict, {})
+
+    def test_update_collection_events_rejects_duplicate_normalized_names(self):
+        collection = SimpleNamespace(recordings=[make_recording("a.rec")])
+
+        with self.assertRaisesRegex(ValueError, "Duplicate behavior recording"):
+            update_collection_events_from_behavior(
+                collection,
+                {
+                    "a": {"event": np.array([[1.0, 2.0]])},
+                    "a.rec": {"event": np.array([[1.0, 2.0]])},
+                },
+            )
+
+    def test_update_collection_events_validates_units_and_event_shapes(self):
+        collection = SimpleNamespace(recordings=[make_recording("a.rec")])
+
+        with self.assertRaisesRegex(ValueError, "source_unit"):
+            update_collection_events_from_behavior(
+                collection,
+                {"a": {"event": np.array([[1.0, 2.0]])}},
+                source_unit="minutes",
+            )
+
+        with self.assertRaisesRegex(ValueError, "shape"):
+            update_collection_events_from_behavior(
+                collection,
+                {"a": {"event": np.array([[1.0, 2.0, 3.0]])}},
+            )
+
     def test_plot_recording_spectral_traces_returns_axes_for_modes(self):
         recording = make_recording("a.rec")
         collection = SimpleNamespace(recordings=[recording])
@@ -215,6 +329,81 @@ class LfpHelperTests(unittest.TestCase):
                 freq_range=(4, 12),
                 regions=["mPFC"],
             )
+
+    def test_event_average_spectrogram_uses_equal_recording_weights_and_windows(self):
+        first = make_recording(
+            "a.rec",
+            events={"evt": np.array([[500, 1500], [2000, 3000]], dtype=float)},
+        )
+        second = make_recording(
+            "b.rec",
+            events={"evt": np.array([[500, 1500]], dtype=float)},
+        )
+        first.power.fill(1.0)
+        second.power.fill(3.0)
+        collection = SimpleNamespace(recordings=[first, second])
+
+        result = plot_event_average_spectrogram(
+            collection,
+            event="evt",
+            mode="power",
+            event_len=1,
+            pre_window=0.5,
+            post_window=0.5,
+            regions=["mPFC"],
+            plot=True,
+        )
+
+        np.testing.assert_allclose(result["average"], 2.0)
+        np.testing.assert_allclose(result["relative_time"], [-0.5, 0.0, 0.5, 1.0])
+        self.assertEqual(result["event_counts"], {"a.rec": 2, "b.rec": 1})
+        self.assertEqual(result["recording_names"], ["a.rec", "b.rec"])
+        self.assertEqual(len(result["axes"]), 1)
+
+    def test_event_average_spectrogram_filters_collection_by_condition(self):
+        first = make_recording(
+            "a.rec",
+            events={"evt": np.array([[0, 1000]], dtype=float)},
+        )
+        second = make_recording(
+            "b.rec",
+            events={"evt": np.array([[0, 1000]], dtype=float)},
+        )
+        first.power.fill(1.0)
+        second.power.fill(4.0)
+        collection = SimpleNamespace(recordings=[first, second])
+
+        result = plot_event_average_spectrogram(
+            collection,
+            event="evt",
+            condition_recordings={"selected": ["b.rec"]},
+            selected_condition="selected",
+            event_len=1,
+            plot=False,
+        )
+
+        np.testing.assert_allclose(result["average"], 4.0)
+        self.assertEqual(result["recording_names"], ["b.rec"])
+        self.assertEqual(result["axes"], [])
+
+    def test_event_average_spectrogram_supports_connectivity_modes(self):
+        recording = make_recording(
+            "a.rec",
+            events={"evt": np.array([[0, 1000]], dtype=float)},
+        )
+        collection = SimpleNamespace(recordings=[recording])
+
+        for mode in ("coherence", "granger"):
+            result = plot_event_average_spectrogram(
+                collection,
+                event="evt",
+                mode=mode,
+                event_len=1,
+                pairs=[("mPFC", "BLA")],
+            )
+
+            self.assertEqual(result["average"].shape, (2, 4, 2, 2))
+            self.assertEqual(len(result["axes"]), 1)
 
     def test_average_events_by_condition_calls_legacy_with_filtered_recordings(self):
         recordings = [make_recording("a.rec"), make_recording("b.rec")]

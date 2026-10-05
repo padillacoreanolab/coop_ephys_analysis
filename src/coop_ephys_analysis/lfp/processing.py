@@ -15,6 +15,142 @@ DEFAULT_SUBJECT_WITH_RECIPIENT_IDS = {"1-2", "2-4", "4-4", "4-3"}
 DEFAULT_SUBJECT_ALONE_IDS = {"6-1", "6-3"}
 
 
+def _recording_name_with_rec_suffix(recording_name):
+    recording_name = str(recording_name)
+    if recording_name.casefold().endswith(".rec"):
+        return recording_name
+    return f"{recording_name}.rec"
+
+
+def _validated_event_array(events, recording_name, event_name, scale):
+    event_array = np.asarray(events, dtype=float)
+    if event_array.size == 0:
+        return np.empty((0, 2), dtype=float)
+
+    event_array = np.atleast_2d(event_array)
+    if event_array.ndim != 2 or event_array.shape[1] != 2:
+        raise ValueError(
+            f"Event {event_name!r} for recording {recording_name!r} must have "
+            "shape (n_events, 2)."
+        )
+    if not np.isfinite(event_array).all():
+        raise ValueError(
+            f"Event {event_name!r} for recording {recording_name!r} contains "
+            "non-finite timestamps."
+        )
+    if np.any(event_array[:, 1] < event_array[:, 0]):
+        raise ValueError(
+            f"Event {event_name!r} for recording {recording_name!r} has a stop "
+            "time before its start time."
+        )
+
+    return event_array.copy() * scale
+
+
+def update_collection_events_from_behavior(
+    collection,
+    behavior_recordings: Mapping[str, Mapping[str, Sequence]],
+    *,
+    source_unit: str = "seconds",
+    strict: bool = True,
+):
+    """Merge processed behavior events into an LFP collection.
+
+    Behavior recording names may omit the ``.rec`` suffix. Imported arrays are
+    copied and converted to milliseconds before replacing matching event keys.
+    Existing event keys that are absent from the behavior input are preserved.
+    All matching inputs are validated before the collection is mutated.
+    """
+    unit_scales = {"seconds": 1000.0, "milliseconds": 1.0}
+    try:
+        scale = unit_scales[source_unit]
+    except KeyError as exc:
+        allowed_units = ", ".join(sorted(unit_scales))
+        raise ValueError(f"source_unit must be one of: {allowed_units}.") from exc
+
+    if not isinstance(behavior_recordings, Mapping):
+        raise ValueError("behavior_recordings must map recording names to event dictionaries.")
+
+    collection_by_name = {}
+    for recording in collection.recordings:
+        normalized_name = _recording_name_with_rec_suffix(recording.name)
+        if normalized_name in collection_by_name:
+            raise ValueError(f"Duplicate LFP recording name after normalization: {normalized_name}")
+        collection_by_name[normalized_name] = recording
+
+    behavior_by_name = {}
+    behavior_source_names = {}
+    for source_name, event_dict in behavior_recordings.items():
+        normalized_name = _recording_name_with_rec_suffix(source_name)
+        if normalized_name in behavior_by_name:
+            raise ValueError(
+                f"Duplicate behavior recording name after normalization: {normalized_name}"
+            )
+        if not isinstance(event_dict, Mapping):
+            raise ValueError(
+                f"Behavior recording {source_name!r} must map event names to arrays."
+            )
+        behavior_by_name[normalized_name] = event_dict
+        behavior_source_names[normalized_name] = str(source_name)
+
+    collection_names = set(collection_by_name)
+    behavior_names = set(behavior_by_name)
+    missing_recordings = sorted(collection_names - behavior_names)
+    unused_behavior_names = sorted(behavior_names - collection_names)
+
+    if strict and missing_recordings:
+        raise ValueError(
+            "Behavior data are missing collection recording(s): "
+            + ", ".join(missing_recordings)
+        )
+
+    matched_names = sorted(collection_names & behavior_names)
+    if not matched_names:
+        raise ValueError("No behavior recording names match this LFP collection.")
+
+    prepared_events = {}
+    for recording_name in matched_names:
+        prepared_events[recording_name] = {
+            str(event_name): _validated_event_array(
+                events,
+                recording_name=recording_name,
+                event_name=event_name,
+                scale=scale,
+            )
+            for event_name, events in behavior_by_name[recording_name].items()
+        }
+
+    if not hasattr(collection, "recording_to_event_dict"):
+        collection.recording_to_event_dict = {}
+    elif collection.recording_to_event_dict is None:
+        collection.recording_to_event_dict = {}
+
+    imported_events = {}
+    for recording_name in matched_names:
+        recording = collection_by_name[recording_name]
+        if getattr(recording, "event_dict", None) is None:
+            recording.event_dict = {}
+        collection_events = collection.recording_to_event_dict.setdefault(
+            recording.name,
+            {},
+        )
+
+        for event_name, event_array in prepared_events[recording_name].items():
+            recording.event_dict[event_name] = event_array.copy()
+            collection_events[event_name] = event_array.copy()
+
+        imported_events[recording.name] = sorted(prepared_events[recording_name])
+
+    return {
+        "updated_recordings": [collection_by_name[name].name for name in matched_names],
+        "imported_events": imported_events,
+        "missing_collection_recordings": missing_recordings,
+        "unused_behavior_recordings": [
+            behavior_source_names[name] for name in unused_behavior_names
+        ],
+    }
+
+
 def parse_animal_id(recording_name: str, animal_id_index: int = 4) -> str | None:
     """Parse the animal ID token from a recording filename."""
     parts = str(recording_name).split("_")

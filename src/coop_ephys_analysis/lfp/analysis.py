@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import warnings
 
 from .processing import select_recordings_by_condition
 
@@ -449,6 +450,280 @@ def _event_boundary_positions(recording, segment_lengths):
     if len(segment_lengths) <= 1:
         return []
     return np.cumsum(segment_lengths)[:-1] * recording.timestep
+
+
+def _extract_event_spectral_windows(
+    recording,
+    event,
+    mode,
+    event_len,
+    pre_window,
+    post_window,
+):
+    """Return complete, time-resolved spectral windows aligned to event onset."""
+    math, _, _, _, np = _analysis_imports()
+    if pre_window < 0 or post_window < 0:
+        raise ValueError("pre_window and post_window must be non-negative seconds.")
+    if event_len is not None and event_len <= 0:
+        raise ValueError("event_len must be a positive number of seconds or None.")
+    if not hasattr(recording, mode):
+        raise AttributeError(
+            f"Recording {recording.name!r} does not have `{mode}`. Calculate or load it first."
+        )
+
+    values = np.asarray(getattr(recording, mode))
+    event_windows = _get_event_windows_ms(recording, event)
+    timestep_ms = recording.timestep * 1000
+    pre_window_ms = pre_window * 1000
+    post_window_ms = post_window * 1000
+    event_len_ms = None if event_len is None else event_len * 1000
+    snippets = []
+
+    for event_start_ms, event_stop_ms in event_windows:
+        analysis_start_ms = event_start_ms - pre_window_ms
+        analyzed_event_stop_ms = (
+            event_stop_ms
+            if event_len_ms is None
+            else event_start_ms + event_len_ms
+        )
+        analysis_stop_ms = analyzed_event_stop_ms + post_window_ms
+        start_idx = math.ceil(analysis_start_ms / timestep_ms)
+        stop_idx = math.ceil(analysis_stop_ms / timestep_ms)
+
+        # Keep only complete windows so every snippet has the requested context.
+        if start_idx < 0 or stop_idx > values.shape[0] or stop_idx <= start_idx:
+            continue
+        snippets.append(np.asarray(values[start_idx:stop_idx, ...], dtype=float))
+
+    return snippets
+
+
+def _pad_event_spectral_windows(windows, target_length=None):
+    """NaN-pad spectral windows along time and return one stacked array."""
+    _, _, _, _, np = _analysis_imports()
+    if not windows:
+        return None
+
+    max_length = max(window.shape[0] for window in windows)
+    if target_length is not None:
+        max_length = max(max_length, target_length)
+    trailing_shape = windows[0].shape[1:]
+    padded = np.full((len(windows), max_length, *trailing_shape), np.nan)
+    for index, window in enumerate(windows):
+        if window.shape[1:] != trailing_shape:
+            raise ValueError("Event spectral windows have incompatible non-time dimensions.")
+        padded[index, : window.shape[0], ...] = window
+    return padded
+
+
+def _nanmean(values, axis):
+    """Calculate a NaN-aware mean without warnings for padded all-NaN cells."""
+    _, _, _, _, np = _analysis_imports()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return np.nanmean(values, axis=axis)
+
+
+def _plot_event_average_heatmap(
+    ax,
+    spectrogram,
+    time_axis,
+    frequencies,
+    title,
+    colorbar_label,
+    event_len,
+):
+    """Draw one event-aligned average spectrogram."""
+    _, _, _, plt, _ = _analysis_imports()
+    image = ax.pcolormesh(time_axis, frequencies, spectrogram.T, shading="auto")
+    if time_axis[0] <= 0 <= time_axis[-1]:
+        ax.axvline(0, color="white", linestyle="--", linewidth=0.9, alpha=0.9)
+    if event_len is not None and time_axis[0] <= event_len <= time_axis[-1]:
+        ax.axvline(event_len, color="white", linestyle="--", linewidth=0.9, alpha=0.9)
+    ax.set_title(title)
+    ax.set_xlabel("Time from event onset (s)")
+    ax.set_ylabel("Frequency (Hz)")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.colorbar(image, ax=ax, label=colorbar_label)
+    plt.tight_layout()
+
+
+def plot_event_average_spectrogram(
+    lfp_collection,
+    event,
+    mode="power",
+    condition_recordings=None,
+    selected_condition=None,
+    event_len=None,
+    pre_window=0,
+    post_window=0,
+    regions=None,
+    pairs=None,
+    freq_range=None,
+    max_traces=None,
+    plot=True,
+):
+    """Average event-aligned spectrograms within recordings, then across a collection.
+
+    Event timestamps are read from each recording in milliseconds. Window-length and
+    pre/post-window arguments are expressed in seconds. Recordings are weighted equally
+    in the collection average, regardless of their number of valid event occurrences.
+    """
+    _, _, _, plt, np = _analysis_imports()
+    mode = mode.lower()
+    if mode not in {"power", "coherence", "granger"}:
+        raise ValueError("mode must be 'power', 'coherence', or 'granger'.")
+    if pre_window < 0 or post_window < 0:
+        raise ValueError("pre_window and post_window must be non-negative seconds.")
+    if event_len is not None and event_len <= 0:
+        raise ValueError("event_len must be a positive number of seconds or None.")
+    if (condition_recordings is None) != (selected_condition is None):
+        raise ValueError(
+            "condition_recordings and selected_condition must be supplied together."
+        )
+
+    if condition_recordings is None:
+        recordings = list(lfp_collection.recordings)
+        condition_label = "all recordings"
+    else:
+        recordings = select_recordings_by_condition(
+            lfp_collection,
+            condition_recordings=condition_recordings,
+            selected_condition=selected_condition,
+        )
+        condition_label = (
+            selected_condition
+            if isinstance(selected_condition, str)
+            else ", ".join(selected_condition)
+        )
+
+    recording_windows = []
+    event_counts = {}
+    skipped_recordings = {}
+    reference_recording = None
+    for recording in recordings:
+        try:
+            windows = _extract_event_spectral_windows(
+                recording,
+                event=event,
+                mode=mode,
+                event_len=event_len,
+                pre_window=pre_window,
+                post_window=post_window,
+            )
+        except ValueError as exc:
+            skipped_recordings[recording.name] = str(exc)
+            continue
+        if not windows:
+            skipped_recordings[recording.name] = "no complete event windows"
+            continue
+
+        if reference_recording is None:
+            reference_recording = recording
+        else:
+            if not np.isclose(recording.timestep, reference_recording.timestep):
+                raise ValueError("Selected recordings have incompatible spectral timesteps.")
+            if not np.array_equal(recording.frequencies, reference_recording.frequencies):
+                raise ValueError("Selected recordings have incompatible frequency bins.")
+            if dict(recording.brain_region_dict) != dict(reference_recording.brain_region_dict):
+                raise ValueError("Selected recordings have incompatible brain-region mappings.")
+            if windows[0].shape[1:] != recording_windows[0][1][0].shape[1:]:
+                raise ValueError("Selected recordings have incompatible spectral array shapes.")
+
+        recording_windows.append((recording, windows))
+        event_counts[recording.name] = len(windows)
+
+    if not recording_windows:
+        raise ValueError(
+            f"Event {event!r} has no complete windows in the selected recordings."
+        )
+
+    max_time_bins = max(
+        window.shape[0]
+        for _, windows in recording_windows
+        for window in windows
+    )
+    recording_averages = []
+    recording_names = []
+    for recording, windows in recording_windows:
+        padded_events = _pad_event_spectral_windows(windows, target_length=max_time_bins)
+        recording_averages.append(_nanmean(padded_events, axis=0))
+        recording_names.append(recording.name)
+
+    recording_averages = np.stack(recording_averages, axis=0)
+    event_average = _nanmean(recording_averages, axis=0)
+    non_time_axes = tuple(range(2, recording_averages.ndim))
+    recording_has_data = ~np.all(np.isnan(recording_averages), axis=non_time_axes)
+    contributing_recordings = np.sum(recording_has_data, axis=0)
+    relative_time = (
+        np.arange(max_time_bins) * reference_recording.timestep - pre_window
+    )
+    freq_idx, freq_label = _frequency_indices(reference_recording, freq_range)
+    frequencies = np.asarray(reference_recording.frequencies)[freq_idx]
+    axes = []
+
+    if plot:
+        total_events = sum(event_counts.values())
+        title_prefix = (
+            f"{event}: {condition_label} | "
+            f"{total_events} events, {len(recording_names)} recordings"
+        )
+        if mode == "power":
+            selected_regions = _selected_regions(
+                reference_recording,
+                regions=regions,
+                max_traces=max_traces,
+            )
+            for region in selected_regions:
+                region_idx = reference_recording.brain_region_dict[region]
+                spectrogram = event_average[:, freq_idx, region_idx]
+                _, ax = plt.subplots(figsize=(12, 4))
+                _plot_event_average_heatmap(
+                    ax,
+                    spectrogram=spectrogram,
+                    time_axis=relative_time,
+                    frequencies=frequencies,
+                    title=f"{title_prefix}\n{region} {mode.title()} ({freq_label})",
+                    colorbar_label=mode.title(),
+                    event_len=event_len,
+                )
+                axes.append(ax)
+        else:
+            pair_indices, pair_labels = _pair_indices(
+                reference_recording,
+                mode,
+                pairs=pairs,
+            )
+            if max_traces is not None:
+                pair_indices = pair_indices[:max_traces]
+                pair_labels = pair_labels[:max_traces]
+            for pair_info, pair_label in zip(pair_indices, pair_labels):
+                first_idx, second_idx, _, _ = pair_info
+                spectrogram = event_average[:, freq_idx, first_idx, second_idx]
+                _, ax = plt.subplots(figsize=(12, 4))
+                _plot_event_average_heatmap(
+                    ax,
+                    spectrogram=spectrogram,
+                    time_axis=relative_time,
+                    frequencies=frequencies,
+                    title=f"{title_prefix}\n{pair_label} {mode.title()} ({freq_label})",
+                    colorbar_label=mode.title(),
+                    event_len=event_len,
+                )
+                axes.append(ax)
+
+    return {
+        "average": event_average,
+        "recording_averages": recording_averages,
+        "relative_time": relative_time,
+        "frequencies": np.asarray(reference_recording.frequencies),
+        "recording_names": recording_names,
+        "event_counts": event_counts,
+        "contributing_recordings": contributing_recordings,
+        "skipped_recordings": skipped_recordings,
+        "axes": axes,
+    }
 
 
 def _plot_event_spectrogram(ax, spectrogram, time_axis, frequencies, event_boundaries, title, colorbar_label):
