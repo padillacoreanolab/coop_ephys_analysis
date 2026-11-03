@@ -19,6 +19,7 @@ from coop_ephys_analysis.lfp import (  # noqa: E402
     build_condition_dict,
     get_iti_windows,
     plot_event_average_spectrogram,
+    plot_event_average_traces,
     plot_recording_event_spectrogram,
     plot_recording_spectral_traces,
     select_recordings_by_condition,
@@ -428,6 +429,138 @@ class LfpHelperTests(unittest.TestCase):
         called_collection = fake_ee.average_events.call_args.args[0]
         self.assertEqual([recording.name for recording in called_collection.recordings], ["b.rec"])
         self.assertEqual(called_collection.brain_region_dict, {"mPFC": 0})
+
+
+
+class EventAverageTraceTests(unittest.TestCase):
+    def tearDown(self):
+        plt.close("all")
+
+    def collection(self):
+        a = make_recording("a.rec", {"selfish": [[500, 1500], [2000, 3000]], "coop": [[3000, 4000]]})
+        b = make_recording("b.rec", {"selfish": [[500, 1500]], "coop": [[3000, 4000]]})
+        a.power.fill(1)
+        b.power.fill(3)
+        return SimpleNamespace(recordings=[a, b])
+
+    def test_equal_recording_weight_sem_and_spectrogram_parity(self):
+        collection = self.collection()
+        result = plot_event_average_traces(collection, "selfish", event_len=1,
+                                          pre_window=.5, post_window=.5,
+                                          freq_range=(4, 8), regions=["mPFC"], plot=False)
+        line = result["lines"][0]
+        trace = line["traces"]["mPFC"]
+        np.testing.assert_allclose(trace["mean"], 2)
+        np.testing.assert_allclose(trace["sem"], 1)
+        np.testing.assert_array_equal(trace["contributing_recordings"], [2]*4)
+        np.testing.assert_allclose(line["relative_time"], [-.5, 0, .5, 1])
+        np.testing.assert_array_equal(line["frequencies"], [4, 8])
+        self.assertEqual(line["event_counts"], {"a.rec": 2, "b.rec": 1})
+        self.assertEqual(result["axes"], [])
+        spectral = plot_event_average_spectrogram(collection, "selfish", event_len=1,
+                                                  pre_window=.5, post_window=.5, plot=False)
+        np.testing.assert_allclose(trace["mean"], spectral["average"][:, 1:3, 0].mean(axis=1))
+
+    def test_frequency_selection_and_recording_first_averaging_with_nans(self):
+        collection = self.collection()
+        a, b = collection.recordings
+        a.event_dict["selfish"] = [[0, 1000]]
+        b.event_dict["selfish"] = [[0, 1000]]
+        a.power[:, 1, 0] = 2
+        a.power[:, 2, 0] = np.nan
+        b.power[:, 1, 0] = 4
+        b.power[:, 2, 0] = 8
+        trace = plot_event_average_traces(collection, "selfish", event_len=1, freq_range=(4, 8),
+                                          regions=["mPFC"], plot=False)["lines"][0]["traces"]["mPFC"]
+        np.testing.assert_allclose(trace["recording_traces"], [[2, 2], [6, 6]])
+        np.testing.assert_allclose(trace["mean"], 4)
+        np.testing.assert_allclose(trace["sem"], 2)
+
+    def test_condition_and_event_comparison_inheritance(self):
+        collection = self.collection()
+        conditions = {"alone": ["a.rec"], "social": ["b.rec"]}
+        for kwargs, second_event, second_rec in (
+            ({"comparison_condition": "social"}, "selfish", "b.rec"),
+            ({"comparison_event": "coop"}, "coop", "a.rec"),
+            ({"comparison_event": "coop", "comparison_condition": "social"}, "coop", "b.rec"),
+        ):
+            with self.subTest(kwargs=kwargs):
+                result = plot_event_average_traces(collection, "selfish", event_len=1,
+                    condition_recordings=conditions, selected_condition="alone",
+                    regions=["mPFC"], labels=("First", "Second"), plot=False, **kwargs)
+                second = result["lines"][1]
+                self.assertEqual(second["event"], second_event)
+                self.assertEqual(second["recording_names"], [second_rec])
+                self.assertEqual(second["label"], "Second")
+                self.assertTrue(np.isnan(second["traces"]["mPFC"]["sem"]).all())
+
+    def test_missing_regions_and_variable_lengths_use_per_trace_counts(self):
+        collection = self.collection()
+        a, b = collection.recordings
+        a.event_dict["selfish"] = [[0, 1500]]
+        b.event_dict["selfish"] = [[0, 1000]]
+        b.power[:, :, 1] = np.nan
+        a.power[1, :, 1] = np.nan
+        result = plot_event_average_traces(collection, "selfish", plot=False)
+        mpfc = result["lines"][0]["traces"]["mPFC"]
+        bla = result["lines"][0]["traces"]["BLA"]
+        np.testing.assert_array_equal(mpfc["contributing_recordings"], [2, 2, 1])
+        np.testing.assert_allclose(mpfc["sem"][:2], 1)
+        self.assertTrue(np.isnan(mpfc["sem"][2]))
+        np.testing.assert_array_equal(bla["contributing_recordings"], [1, 0, 1])
+        self.assertTrue(np.isnan(bla["mean"][1]))
+        self.assertTrue(np.isnan(bla["sem"]).all())
+
+    def test_connectivity_direction_panels_and_shading(self):
+        collection = self.collection()
+        for rec in collection.recordings:
+            rec.coherence[:, :, 0, 1] = 0.4
+            rec.granger[:, :, 0, 1] = 2
+            rec.granger[:, :, 1, 0] = 7
+        for mode, label, expected in (("coherence", "mPFC & BLA", .4),
+                                      ("granger", "BLA to mPFC", 2)):
+            result = plot_event_average_traces(collection, "selfish", mode=mode,
+                comparison_event="coop", event_len=1, pairs=[("mPFC", "BLA")],
+                labels=("Selfish", "Cooperative"))
+            self.assertEqual(result["trace_labels"], [label])
+            self.assertEqual(len(result["axes"]), 1)
+            np.testing.assert_allclose(result["lines"][0]["traces"][label]["mean"], expected)
+            ax = result["axes"][0]
+            self.assertEqual(len(ax.collections), 2)
+            self.assertIn("Selfish", ax.get_legend().get_texts()[0].get_text())
+        reverse = plot_event_average_traces(collection, "selfish", mode="granger", event_len=1,
+                                            pairs=[("BLA", "mPFC")], plot=False)
+        np.testing.assert_allclose(reverse["lines"][0]["traces"]["mPFC to BLA"]["mean"], 7)
+
+    def test_skipped_recordings_and_no_complete_windows(self):
+        collection = self.collection()
+        collection.recordings[1].event_dict = {}
+        result = plot_event_average_traces(collection, "selfish", event_len=1, plot=False)
+        self.assertIn("b.rec", result["lines"][0]["skipped_recordings"])
+        with self.assertRaisesRegex(ValueError, "no complete windows"):
+            plot_event_average_traces(collection, "selfish", pre_window=100, plot=False)
+
+    def test_validation_and_comparison_compatibility(self):
+        collection = self.collection()
+        for kwargs in ({"labels": "wrong"}, {"labels": ["a", "b"]},
+                       {"max_traces": 0}, {"regions": ["absent"]},
+                       {"freq_range": (100, 200)}, {"comparison_condition": "alone"},
+                       {"comparison_event": "coop", "labels": ["same", "same"]}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                plot_event_average_traces(collection, "selfish", event_len=1, plot=False, **kwargs)
+        collection.recordings[1].timestep = .25
+        with self.assertRaisesRegex(ValueError, "incompatible"):
+            plot_event_average_traces(collection, "selfish", event_len=1, plot=False,
+                condition_recordings={"a": ["a.rec"], "b": ["b.rec"]},
+                selected_condition="a", comparison_condition="b")
+
+    def test_max_traces_and_pooled_conditions(self):
+        result = plot_event_average_traces(self.collection(), "selfish", event_len=1,
+            condition_recordings={"a": ["a.rec"], "b": ["b.rec"]},
+            selected_condition=["a", "b"], max_traces=1, plot=False)
+        self.assertEqual(len(result["lines"]), 1)
+        self.assertEqual(result["trace_labels"], ["mPFC"])
+        self.assertEqual(len(result["lines"][0]["recording_names"]), 2)
 
 
 if __name__ == "__main__":

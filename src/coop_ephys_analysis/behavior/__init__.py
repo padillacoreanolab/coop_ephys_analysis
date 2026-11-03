@@ -17,6 +17,7 @@ from .behavior_qc import (
     find_filtered_nose_pokes,
     find_iti_windows,
     plot_recordings_behaviors,
+    remove_forced_trials_nose_poke,
     threshold_stage_behaviors,
 )
 
@@ -34,6 +35,7 @@ __all__ = [
     "load_stage_pickles",
     "load_trodes_recording",
     "plot_recordings_behaviors",
+    "remove_forced_trials_nose_poke",
     "save_pickle",
     "save_stage_pickles",
     "threshold_stage_behaviors",

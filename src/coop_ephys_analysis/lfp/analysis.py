@@ -726,6 +726,168 @@ def plot_event_average_spectrogram(
     }
 
 
+def plot_event_average_traces(
+    lfp_collection,
+    event,
+    mode="power",
+    condition_recordings=None,
+    selected_condition=None,
+    event_len=None,
+    pre_window=0,
+    post_window=0,
+    regions=None,
+    pairs=None,
+    freq_range=None,
+    max_traces=None,
+    plot=True,
+    *,
+    comparison_event=None,
+    comparison_condition=None,
+    labels=None,
+):
+    """Plot event-aligned band means with SEM across recording averages.
+
+    Core parameters and window semantics match plot_event_average_spectrogram:
+    event timestamps are milliseconds, window arguments are seconds, and
+    freq_range is an inclusive Hz range. Complete windows are averaged within
+    recordings first, then frequency bins are averaged, then recordings receive
+    equal weight. No normalization, smoothing, or additional resampling is done.
+
+    Supply comparison_event and/or comparison_condition to add a second line;
+    omitted comparison fields inherit the first line's selection. Without either,
+    one line is returned. labels optionally supplies one or two distinct legend
+    labels. Lists in selected_condition retain the spectrogram's pooled-condition
+    semantics; use comparison_condition to draw a separate line instead.
+
+    Power yields one panel per region; coherence/Granger yield one per pair.
+    As in the spectrogram, Granger pairs are (target, source), labeled source to
+    target. max_traces limits panels, not comparison lines. plot=False computes
+    the same results without creating figures.
+
+    Returns a dict with axes, trace_labels, mode, freq_range, and lines. Each line
+    contains label, event, selected_condition, relative_time, frequencies,
+    recording_names, event_counts, skipped_recordings, and traces. Each trace
+    contains recording_traces (recording x time), mean, sem, and per-time-bin
+    contributing_recordings. SEM uses sample SD (ddof=1) / sqrt(n); it is NaN
+    with fewer than two contributing recordings. Variable event lengths retain
+    NaN padding, so contributing counts can vary over time and across panels.
+    """
+    _, _, _, plt, np = _analysis_imports()
+    mode = mode.lower()
+    has_comparison = comparison_event is not None or comparison_condition is not None
+    selections = [(event, selected_condition)]
+    if has_comparison:
+        selections.append((
+            event if comparison_event is None else comparison_event,
+            selected_condition if comparison_condition is None else comparison_condition,
+        ))
+    if labels is not None:
+        if isinstance(labels, str):
+            raise ValueError("labels must contain one label per comparison line.")
+        labels = list(labels)
+        if (len(labels) != len(selections)
+                or any(not isinstance(label, str) or not label.strip() for label in labels)
+                or len(set(labels)) != len(labels)):
+            raise ValueError("labels must contain a distinct nonempty string for each line.")
+    if max_traces is not None and (
+        isinstance(max_traces, (bool, np.bool_))
+        or not isinstance(max_traces, (int, np.integer)) or max_traces < 1
+    ):
+        raise ValueError("max_traces must be a positive integer or None.")
+    regions = None if regions is None else list(regions)
+    pairs = None if pairs is None else list(pairs)
+    lines = []
+    reference = None
+    trace_labels = None
+    for line_index, (line_event, condition) in enumerate(selections):
+        spectral = plot_event_average_spectrogram(
+            lfp_collection, event=line_event, mode=mode,
+            condition_recordings=condition_recordings, selected_condition=condition,
+            event_len=event_len, pre_window=pre_window, post_window=post_window,
+            freq_range=freq_range, plot=False,
+        )
+        recording = _resolve_recording(lfp_collection, spectral["recording_names"][0])
+        if reference is None:
+            reference = recording
+        elif (not np.isclose(recording.timestep, reference.timestep)
+              or not np.array_equal(recording.frequencies, reference.frequencies)
+              or dict(recording.brain_region_dict) != dict(reference.brain_region_dict)):
+            raise ValueError("Comparison lines have incompatible timesteps, frequencies, or region mappings.")
+        freq_idx, freq_label = _frequency_indices(recording, freq_range)
+        if mode == "power":
+            panel_labels = _selected_regions(recording, regions, max_traces)
+            panel_indices = [(recording.brain_region_dict[name],) for name in panel_labels]
+        else:
+            pair_indices, panel_labels = _pair_indices(recording, mode, pairs)
+            panel_indices = [(pair[0], pair[1]) for pair in pair_indices]
+            if max_traces is not None:
+                panel_indices = panel_indices[:max_traces]
+                panel_labels = panel_labels[:max_traces]
+        if not panel_labels or len(set(panel_labels)) != len(panel_labels):
+            raise ValueError("Select at least one region/pair, without duplicate panels.")
+        trace_labels = panel_labels
+        traces = {}
+        for panel_label, indices in zip(panel_labels, panel_indices):
+            values = spectral["recording_averages"][(slice(None), slice(None), slice(None), *indices)]
+            recording_traces = _nanmean(values[:, :, freq_idx], axis=2)
+            recording_traces = np.where(np.isfinite(recording_traces), recording_traces, np.nan)
+            n = np.sum(np.isfinite(recording_traces), axis=0)
+            mean = _nanmean(recording_traces, axis=0)
+            sem = np.full(mean.shape, np.nan)
+            valid = n >= 2
+            squared_deviations = np.nansum((recording_traces - mean) ** 2, axis=0)
+            sem[valid] = np.sqrt(squared_deviations[valid] / (n[valid] - 1) / n[valid])
+            traces[panel_label] = {
+                "recording_traces": recording_traces,
+                "mean": mean, "sem": sem, "contributing_recordings": n,
+            }
+        condition_label = (
+            "all recordings" if condition is None else
+            condition if isinstance(condition, str) else ", ".join(condition)
+        )
+        lines.append({
+            "label": labels[line_index] if labels is not None else f"{line_event} | {condition_label}",
+            "event": line_event, "selected_condition": condition,
+            "relative_time": spectral["relative_time"],
+            "frequencies": spectral["frequencies"][freq_idx],
+            "recording_names": spectral["recording_names"],
+            "event_counts": spectral["event_counts"],
+            "skipped_recordings": spectral["skipped_recordings"],
+            "traces": traces,
+        })
+        # Keep only the reduced traces between lines, not the full spectrograms.
+        del values, spectral
+
+    axes = []
+    if plot:
+        for panel_label in trace_labels:
+            _, ax = plt.subplots(figsize=(10, 4))
+            for line_index, line in enumerate(lines):
+                trace = line["traces"][panel_label]
+                time = line["relative_time"]
+                color = f"C{line_index}"
+                counts = (f"{len(line['recording_names'])} recordings, "
+                          f"{sum(line['event_counts'].values())} events")
+                ax.plot(time, trace["mean"], color=color, label=f"{line['label']} ({counts})")
+                ax.fill_between(time, trace["mean"] - trace["sem"],
+                                trace["mean"] + trace["sem"], color=color, alpha=0.2)
+            first_time = min(line["relative_time"][0] for line in lines)
+            last_time = max(line["relative_time"][-1] for line in lines)
+            if first_time <= 0 <= last_time:
+                ax.axvline(0, color="black", linestyle="--", linewidth=0.9)
+            if event_len is not None and first_time <= event_len <= last_time:
+                ax.axvline(event_len, color="gray", linestyle=":", linewidth=0.9)
+            ax.set_title(f"{panel_label} | {mode.title()} ({freq_label}) | mean +/- SEM")
+            ax.set_xlabel("Time from event onset (s)")
+            ax.set_ylabel(f"Mean {mode} (stored scale)")
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.legend(frameon=False, fontsize="small")
+            plt.tight_layout()
+            axes.append(ax)
+    return {"lines": lines, "axes": axes, "trace_labels": trace_labels,
+            "mode": mode, "freq_range": freq_range}
+
+
 def _plot_event_spectrogram(ax, spectrogram, time_axis, frequencies, event_boundaries, title, colorbar_label):
     """Draw one event-concatenated spectrogram heatmap."""
     _, _, _, plt, _ = _analysis_imports()

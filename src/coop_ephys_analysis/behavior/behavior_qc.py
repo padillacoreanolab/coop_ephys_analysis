@@ -1,12 +1,14 @@
 """Utilities for quality-control checks on behavior events."""
+import re
+
 import external.diff_fam_social_memory_ephys.behavior.behavioral_epoch_tools as bet
 import matplotlib.pyplot as plt
 import numpy as np
 
 
 _FILTERED_NOSE_POKE_PAIRS = (
-    ("selfish nose poke", "selfish light", "filtered selfish nose pokes"),
-    ("coop nose poke", "coop light", "filtered coop nose pokes"),
+    ("selfish nose poke", "selfish light", "filtered selfish nose poke"),
+    ("coop nose poke", "coop light", "filtered coop nose poke"),
 )
 
 
@@ -215,10 +217,13 @@ def between_events_duration_distribution(
 _DEFAULT_BEHAVIOR_ORDER = (
     "selfish light",
     "selfish nose poke",
+    "filtered selfish nose poke",
     "subject port entry",
     "coop light",
     "coop nose poke",
+    "filtered coop nose poke",
     "recipient port entry",
+    "baseline iti 2s",
 )
 _BASELINE_ITI_COLOR = "#B0B0B0"
 
@@ -343,36 +348,55 @@ def plot_recordings_behaviors(
 
 def find_filtered_nose_pokes(
     behaviors,
-    max_gap=1.0,
+    expected_delay=1.0,
+    tolerance=0.10,
     stage=None,
     day=None,
     save=False,
+    *,
+    recording_name=None,
 ):
     """Find nose-poke bouts associated with their corresponding light onset.
 
-    A light can match an unused nose poke when it begins during the poke or no
-    more than ``max_gap`` seconds after the poke ends. Lights are processed in
-    chronological order and select the closest eligible unused poke. The input
-    hierarchy is preserved in the returned result.
+    Nose pokes are processed in stable chronological onset order. Each selects
+    an unused corresponding light whose onset delay is within
+    ``effective_delay +/- tolerance`` (inclusive), preferring the delay closest
+    to that effective delay. Recording names containing a complete D1-D6 token
+    use ``expected_delay - 1.0`` seconds; D7-D8, other days, and missing or
+    unrecognized names use ``expected_delay`` unchanged. A negative effective
+    delay raises ValueError. Ties prefer earlier lights, then original input order.
+    Each light and poke can be matched only once; matches are not reassigned.
+    Offsets do not affect matching after interval validation. Complete matched
+    intervals and the input hierarchy are preserved. For merged bouts, matching
+    uses the merged bout's onset, not the onsets of its constituent raw pokes.
 
     Parameters:
         behaviors (list or dict): A stage list, day dictionary, or one recording's
             behavior dictionary.
-        max_gap (float): Maximum seconds allowed between a poke ending and its
-            corresponding light beginning.
+        expected_delay (float): Base light onset minus nose-poke onset in seconds,
+            before the recording-day adjustment. Must be finite and nonnegative;
+            defaults to 1.0 (and must be at least 1.0 for D1-D6 recordings).
+        tolerance (float): Allowed deviation from the expected delay in seconds.
+            Must be finite and nonnegative; defaults to 0.10.
         stage (int or str): Optional stage label retained for API consistency.
         day (int): Optional 1-based day to process when ``behaviors`` is a stage list.
+            Selects an input entry only; timing comes from recording names.
         save (bool): If True, copy filtered arrays into the supplied behavior
-            dictionaries under ``filtered selfish nose pokes`` and
-            ``filtered coop nose pokes``.
+            dictionaries under ``filtered selfish nose poke`` and
+            ``filtered coop nose poke``.
+        recording_name (str or None): Optional name for a single-recording event
+            dictionary. Nested inputs always use their recording keys instead.
+            If absent or unrecognized, the base expected delay is used.
 
     Returns:
         dict or list: Filtered event arrays following the input hierarchy.
     """
     del stage
-    max_gap = float(max_gap)
-    if not np.isfinite(max_gap) or max_gap < 0:
-        raise ValueError("max_gap must be a finite value greater than or equal to 0.")
+    expected_delay = float(expected_delay)
+    tolerance = float(tolerance)
+    for name, value in (("expected_delay", expected_delay), ("tolerance", tolerance)):
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be a finite value greater than or equal to 0.")
 
     if isinstance(behaviors, list):
         if day is not None:
@@ -381,12 +405,15 @@ def find_filtered_nose_pokes(
                 raise ValueError(f"day must be between 1 and {len(behaviors)}")
             return _filter_nose_pokes_for_day(
                 behaviors[day_index],
-                max_gap=max_gap,
+                expected_delay=expected_delay,
+                tolerance=tolerance,
                 save=save,
             )
 
         return [
-            _filter_nose_pokes_for_day(day_data, max_gap=max_gap, save=save)
+            _filter_nose_pokes_for_day(
+                day_data, expected_delay=expected_delay, tolerance=tolerance, save=save
+            )
             for day_data in behaviors
         ]
 
@@ -394,7 +421,9 @@ def find_filtered_nose_pokes(
         if _is_recording_behaviors(behaviors):
             filtered = _filter_nose_pokes_for_recording(
                 behaviors,
-                max_gap=max_gap,
+                expected_delay=expected_delay,
+                tolerance=tolerance,
+                recording_name=recording_name,
             )
             if save:
                 _save_filtered_nose_pokes(behaviors, filtered)
@@ -402,7 +431,8 @@ def find_filtered_nose_pokes(
 
         return _filter_nose_pokes_for_day(
             behaviors,
-            max_gap=max_gap,
+            expected_delay=expected_delay,
+            tolerance=tolerance,
             save=save,
         )
 
@@ -411,12 +441,14 @@ def find_filtered_nose_pokes(
     )
 
 
-def _filter_nose_pokes_for_day(day_data, max_gap, save):
+def _filter_nose_pokes_for_day(day_data, expected_delay, tolerance, save):
     filtered_day = {}
     for recording_name, recording_behaviors in day_data.items():
         filtered = _filter_nose_pokes_for_recording(
             recording_behaviors,
-            max_gap=max_gap,
+            expected_delay=expected_delay,
+            tolerance=tolerance,
+            recording_name=recording_name,
         )
         if save:
             _save_filtered_nose_pokes(recording_behaviors, filtered)
@@ -424,7 +456,25 @@ def _filter_nose_pokes_for_day(day_data, max_gap, save):
     return filtered_day
 
 
-def _filter_nose_pokes_for_recording(recording_behaviors, max_gap):
+def _recording_expected_delay(recording_name, expected_delay):
+    if not isinstance(recording_name, str):
+        return expected_delay
+    match = re.search(r"(?:^|_)D([0-9]+)(?=_|\.|$)", recording_name)
+    if match is None or not 1 <= int(match.group(1)) <= 6:
+        return expected_delay
+    effective_delay = expected_delay - 1.0
+    if effective_delay < 0:
+        raise ValueError(
+            f"Recording {recording_name!r} has a negative effective delay "
+            f"({effective_delay}) from expected_delay={expected_delay} minus 1.0."
+        )
+    return effective_delay
+
+
+def _filter_nose_pokes_for_recording(
+    recording_behaviors, expected_delay, tolerance, recording_name=None
+):
+    effective_delay = _recording_expected_delay(recording_name, expected_delay)
     filtered = {}
     for nose_poke_name, light_name, filtered_name in _FILTERED_NOSE_POKE_PAIRS:
         nose_pokes = _valid_behavior_intervals(
@@ -438,7 +488,8 @@ def _filter_nose_pokes_for_recording(recording_behaviors, max_gap):
         filtered[filtered_name] = _match_nose_pokes_to_lights(
             nose_pokes,
             lights,
-            max_gap=max_gap,
+            expected_delay=effective_delay,
+            tolerance=tolerance,
         )
     return filtered
 
@@ -462,45 +513,113 @@ def _valid_behavior_intervals(events, event_name):
     return event_array[valid_rows].copy()
 
 
-def _match_nose_pokes_to_lights(nose_pokes, lights, max_gap):
+def _match_nose_pokes_to_lights(nose_pokes, lights, expected_delay, tolerance):
     if len(nose_pokes) == 0 or len(lights) == 0:
         return np.empty((0, 2), dtype=float)
 
-    nose_order = np.lexsort((nose_pokes[:, 1], nose_pokes[:, 0]))
-    light_order = np.lexsort((lights[:, 1], lights[:, 0]))
+    nose_order = np.argsort(nose_pokes[:, 0], kind="stable")
+    light_order = np.argsort(lights[:, 0], kind="stable")
     sorted_nose_pokes = nose_pokes[nose_order]
     sorted_lights = lights[light_order]
-    used_nose_pokes = set()
+    used_lights = set()
     matched_nose_pokes = []
 
-    for light_start, _ in sorted_lights:
+    for poke in sorted_nose_pokes:
         eligible = []
-        for poke_index, (poke_start, poke_stop) in enumerate(sorted_nose_pokes):
-            if poke_index in used_nose_pokes:
+        for light_index, (light_start, _) in enumerate(sorted_lights):
+            if light_index in used_lights:
                 continue
-            if poke_start <= light_start <= poke_stop + max_gap:
-                separation = max(0.0, light_start - poke_stop)
+            delay = light_start - poke[0]
+            if expected_delay - tolerance <= delay <= expected_delay + tolerance:
                 eligible.append(
-                    (separation, -poke_stop, -poke_start, poke_index)
+                    (abs(delay - expected_delay), light_index)
                 )
 
         if not eligible:
             continue
 
-        _, _, _, matched_index = min(eligible)
-        used_nose_pokes.add(matched_index)
-        matched_nose_pokes.append(sorted_nose_pokes[matched_index].copy())
+        _, matched_index = min(eligible)
+        used_lights.add(matched_index)
+        matched_nose_pokes.append(poke.copy())
 
     if not matched_nose_pokes:
         return np.empty((0, 2), dtype=float)
 
-    matched = np.asarray(matched_nose_pokes, dtype=float)
-    return matched[np.lexsort((matched[:, 1], matched[:, 0]))]
+    return np.asarray(matched_nose_pokes, dtype=float)
 
 
 def _save_filtered_nose_pokes(recording_behaviors, filtered):
     for event_name, event_array in filtered.items():
         recording_behaviors[event_name] = event_array.copy()
+
+
+def remove_forced_trials_nose_poke(behaviors, n_remove=20):
+    """Remove the earliest filtered nosepokes of each type in every recording.
+
+    Parameters:
+        behaviors (list or dict): A stage list, recording-keyed day dictionary,
+            or one recording's event dictionary, as for find_filtered_nose_pokes.
+        n_remove (int): Number to remove independently from each recording's
+            ``filtered selfish nose poke`` and ``filtered coop nose poke``.
+            Defaults to 20. Must be nonnegative; booleans are not accepted.
+
+    Returns:
+        list or dict: The same input object, with its filtered arrays replaced
+            in place. All other events remain unchanged.
+
+    Both filtered keys and valid (N, 2) finite start/stop arrays are required.
+    All recordings are validated before any changes are made. Arrays are sorted
+    stably by onset and retain their full intervals after the first n_remove
+    rows are removed. Short arrays become empty (0, 2) arrays; zero leaves the
+    original arrays unchanged. Each call removes another batch from the current
+    arrays. Rerun find_filtered_nose_pokes with save=True to restore full arrays.
+    """
+    if isinstance(n_remove, (bool, np.bool_)) or not isinstance(n_remove, (int, np.integer)):
+        raise ValueError("n_remove must be a nonnegative integer, excluding booleans.")
+    if n_remove < 0:
+        raise ValueError("n_remove must be a nonnegative integer.")
+
+    recordings = []
+
+    def collect_day_or_recording(data, location):
+        if not isinstance(data, dict):
+            raise ValueError(f"{location}: expected a recording or day dictionary.")
+        if _is_recording_behaviors(data):
+            recordings.append((location, data))
+        else:
+            for name, events in data.items():
+                if not isinstance(events, dict) or not _is_recording_behaviors(events):
+                    raise ValueError(f"{location}, recording {name!r}: expected an event dictionary.")
+                recordings.append((f"{location}, recording {name!r}", events))
+
+    if isinstance(behaviors, list):
+        for day_index, day_data in enumerate(behaviors, start=1):
+            collect_day_or_recording(day_data, f"day {day_index}")
+    else:
+        collect_day_or_recording(behaviors, "behaviors")
+
+    replacements = []
+    for location, events in recordings:
+        for _, _, key in _FILTERED_NOSE_POKE_PAIRS:
+            if key not in events:
+                raise KeyError(f"{location}: missing required filtered event {key!r}.")
+            try:
+                intervals = np.asarray(events[key], dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{location}, {key!r}: expected numeric (N, 2) intervals.") from exc
+            if intervals.shape == (0,):
+                intervals = intervals.reshape(0, 2)
+            if intervals.ndim != 2 or intervals.shape[1] != 2:
+                raise ValueError(f"{location}, {key!r}: expected (N, 2) start/stop intervals.")
+            if not np.isfinite(intervals).all() or np.any(intervals[:, 1] <= intervals[:, 0]):
+                raise ValueError(f"{location}, {key!r}: intervals must be finite with stop > start.")
+            if n_remove:
+                order = np.argsort(intervals[:, 0], kind="stable")
+                replacements.append((events, key, intervals[order][n_remove:].copy()))
+
+    for events, key, retained in replacements:
+        events[key] = retained
+    return behaviors
 
 
 def find_iti_windows(

@@ -8,6 +8,7 @@ from .analysis import (
     plot_collection_event_spectrogram,
     plot_collection_spectral_traces,
     plot_event_average_spectrogram,
+    plot_event_average_traces,
     plot_recording_event_spectrogram,
     plot_recording_spectral_traces,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "plot_collection_event_spectrogram",
     "plot_collection_spectral_traces",
     "plot_event_average_spectrogram",
+    "plot_event_average_traces",
     "plot_recording_event_spectrogram",
     "plot_recording_spectral_traces",
     "select_recordings_by_condition",
