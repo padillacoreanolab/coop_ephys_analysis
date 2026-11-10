@@ -1,5 +1,13 @@
 """LFP helpers for coop_ephys_analysis."""
 
+from .baseline import (
+    calculate_event_baseline_power,
+    export_event_baseline_csv,
+    export_event_baseline_trialwise_csv,
+    load_event_baseline_collection,
+    plot_baselined_event_average_spectrogram,
+    plot_baselined_event_average_traces,
+)
 from .analysis import (
     average_events_by_condition,
     condition_event_spectrum,
@@ -25,6 +33,12 @@ from .processing import (
 )
 
 __all__ = [
+    "calculate_event_baseline_power",
+    "export_event_baseline_csv",
+    "export_event_baseline_trialwise_csv",
+    "load_event_baseline_collection",
+    "plot_baselined_event_average_spectrogram",
+    "plot_baselined_event_average_traces",
     "DEFAULT_RECIPIENT_IDS",
     "DEFAULT_SUBJECT_ALONE_IDS",
     "DEFAULT_SUBJECT_WITH_RECIPIENT_IDS",
